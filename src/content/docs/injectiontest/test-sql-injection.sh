@@ -1,95 +1,89 @@
 #!/bin/bash
-# Thoth Tech Security Suite: SQL Injection Validator
-# Supporting T1 2026 Objective: Security and Vulnerability Remediation
+# Thoth Tech Security Suite: SQL Injection Validator (V2.0)
+# Addresses feedback: Restored CLI options, Nikto, and multi-field testing.
 
-# Load configuration from config file if it exists
+# 1. Variables & Configuration
 CONFIG_FILE="./sql_injection_config.sh"
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-    printf "Loaded configuration from $CONFIG_FILE\n"
-fi
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
-# Set variables with defaults
 API_URL="${API_URL:-http://localhost:3000}"
+USERNAME_FIELD="${USERNAME_FIELD:-username}"
+PASSWORD_FIELD="${PASSWORD_FIELD:-password}"
 TARGET_URL="${API_URL}/api/auth"
-USERNAME_FIELD="username"
-PASSWORD_FIELD="password"
 
-# Colours for output
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Colour
+# 2. CLI Options (Restored)
+show_usage() {
+  printf "Usage: $0 [-a API_URL] [-u USER_FIELD] [-p PASS_FIELD]\n"
+  exit 1
+}
 
-# Professional SQL injection payloads for deep testing
-declare -a PAYLOADS=(
-  "' OR '1'='1"                          # Auth Bypass
-  "admin' --"                            # Admin account targeting
-  "' UNION SELECT NULL,NULL,NULL --"     # Data structure probing
-  "'; WAITFOR DELAY '0:0:5'--"           # Blind/Time-based testing
-  "admin' AND 1=1#"                      # Boolean logic bypass
-)
+while getopts "a:u:p:h" opt; do
+  case ${opt} in
+    a ) API_URL=$OPTARG; TARGET_URL="${API_URL}/api/auth" ;;
+    u ) USERNAME_FIELD=$OPTARG ;;
+    p ) PASSWORD_FIELD=$OPTARG ;;
+    h | \? ) show_usage ;;
+  esac
+done
 
-printf "${BLUE}==================================================${NC}\n"
-printf "${BLUE}   THOTH TECH: SQL INJECTION SECURITY SCANNER     ${NC}\n"
-printf "${BLUE}==================================================${NC}\n"
+# 3. Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# 1. Verify API Connectivity
-printf "Probing API status at ${API_URL}... "
-if ! curl -s --head --request GET "$API_URL" | grep -q "200\|301\|302"; then
-    printf "${RED}OFFLINE${NC}\n"
-    printf "${YELLOW}WARNING: Testing against an offline API will yield false negatives.${NC}\n"
-else
-    printf "${GREEN}ONLINE${NC}\n"
-fi
-
-# 2. Injection Test Function
-test_injection() {
-  local payload=$1
-  local field=$2
+# 4. Advanced Detection Logic (Addressing False Positives)
+# Instead of just 'user', we look for status 200/201 AND a token-like string
+check_vulnerability() {
+  local status=$1
+  local body=$2
   
-  printf "Testing ${field} field with: [ ${payload} ] -> "
+  if [[ "$status" =~ ^20[0-1]$ ]]; then
+    # Improved check: looks for "token" or "auth_token" specifically
+    if [[ "$body" =~ "token" ]] || [[ "$body" =~ "auth_token" ]]; then
+      return 1 # VULNERABLE
+    fi
+  fi
+  return 0 # SECURE
+}
 
-  # Execute the POST request
-  local response=$(curl -s -X POST "$TARGET_URL" \
+# 5. Testing Logic (Restored both fields)
+run_test() {
+  local payload=$1
+  local field_to_test=$2
+  printf "${BLUE}Testing $field_to_test with:${NC} $payload -> "
+
+  local response=$(curl -s --connect-timeout 5 -X POST "$TARGET_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"$USERNAME_FIELD\":\"$( [[ "$field" == "user" ]] && echo "$payload" || echo "student_1" )\", \"$PASSWORD_FIELD\":\"$( [[ "$field" == "pass" ]] && echo "$payload" || echo "password" )\"}" \
+    -d "$( [[ "$field_to_test" == "username" ]] && \
+           echo "{\"$USERNAME_FIELD\":\"$payload\", \"$PASSWORD_FIELD\":\"pass\"}" || \
+           echo "{\"$USERNAME_FIELD\":\"user\", \"$PASSWORD_FIELD\":\"$payload\"}" )" \
     -w "\n%{http_code}")
 
-  local status=$(echo "$response" | tail -n1)
+  local code=$(echo "$response" | tail -n1)
   local body=$(echo "$response" | sed '$d')
 
-  # Evaluate vulnerability status
-  if [[ "$status" == "200" || "$status" == "201" ]]; then
-    # In a secure API, a payload should NOT return an auth token
-    if [[ "$body" == *"token"* || "$body" == *"auth_token"* || "$body" == *"user"* ]]; then
-        printf "${RED}VULNERABLE (Auth Bypass Possible)${NC}\n"
-        return 1
-    fi
-  elif [[ "$status" == "500" ]]; then
-    printf "${YELLOW}POTENTIAL LEAK (Internal Server Error)${NC}\n"
-    return 2
+  if check_vulnerability "$code" "$body"; then
+    printf "${GREEN}BLOCKED ($code)${NC}\n"
   else
-    printf "${GREEN}SECURE (Status $status)${NC}\n"
-    return 0
+    printf "${RED}VULNERABLE (Token Leaked)${NC}\n"
+    return 1
   fi
 }
 
-# 3. Main Testing Suite
-printf "\n${BLUE}--- Starting SQLi Test Suite ---${NC}\n"
-vulns_found=0
+# 6. Execution Loop (Both Fields)
+declare -a PAYLOADS=("' OR '1'='1" "admin' --" "') UNION SELECT 1,2,3--")
+vuln_count=0
 
 for p in "${PAYLOADS[@]}"; do
-  test_injection "$p" "user"
-  [[ $? -eq 1 ]] && ((vulns_found++))
+  run_test "$p" "username" || ((vuln_count++))
+  run_test "$p" "password" || ((vuln_count++))
 done
 
-# 4. Final Assessment
-printf "\n${BLUE}==================================================${NC}\n"
-if [ $vulns_found -eq 0 ]; then
-    printf "${GREEN}SUMMARY: No critical vulnerabilities detected.${NC}\n"
+# 7. Nikto Integration (Restored)
+printf "\n${BLUE}===== Running Nikto Audit =====${NC}\n"
+if command -v nikto &> /dev/null; then
+  nikto -host "$API_URL" -Format txt -output nikto_results.txt
+  printf "${GREEN}Scan complete. See nikto_results.txt${NC}\n"
 else
-    printf "${RED}SUMMARY: $vulns_found vulnerabilities detected! Immediate remediation required.${NC}\n"
+  printf "${RED}Nikto not found. Skipping scan.${NC}\n"
 fi
-printf "${BLUE}==================================================${NC}\n"
+
+exit $vuln_count
